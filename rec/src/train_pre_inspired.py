@@ -12,7 +12,9 @@ from accelerate.utils import set_seed
 from loguru import logger
 from torch.utils.data import DataLoader
 from tqdm.auto import tqdm
-from transformers import AdamW, get_linear_schedule_with_warmup, AutoTokenizer, AutoModel
+from transformers import get_linear_schedule_with_warmup, AutoTokenizer, AutoModel
+from torch.optim import AdamW
+
 from dataset_dbpedia_inspired import DBpedia ,Co_occurrence ,text_sim ,image_sim
 from dataset_pre_inspired import CRSDataset, CRSDataCollator_mm
 from evaluate_rec import RecEvaluator
