@@ -1,0 +1,8 @@
+accelerate
+transformers<5.0.0
+wandb
+loguru
+torch-sparse
+torch-scatter
+nltk
+git+https://github.com/pyg-team/pytorch_geometric.git
