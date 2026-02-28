@@ -2,7 +2,5 @@ accelerate
 transformers<5.0.0
 wandb
 loguru
-torch-sparse -f https://data.pyg.org/whl/torch-{torch.__version__}.html
-torch-scatter -f https://data.pyg.org/whl/torch-{torch.__version__}.html
 nltk
 git+https://github.com/pyg-team/pytorch_geometric.git
