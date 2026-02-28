@@ -12,7 +12,8 @@ from accelerate.utils import set_seed
 from loguru import logger
 from torch.utils.data import DataLoader, random_split
 from tqdm.auto import tqdm
-from transformers import AdamW, get_linear_schedule_with_warmup, AutoTokenizer, AutoModel
+from transformers import get_linear_schedule_with_warmup, AutoTokenizer, AutoModel
+from torch.optim import AdamW
 from config import gpt2_special_tokens_dict, prompt_special_tokens_dict
 from dataset_dbpedia_inspired import DBpedia ,Co_occurrence,text_sim,image_sim
 from dataset_rec import CRSRecDataset, CRSRecDataCollator
@@ -34,10 +35,10 @@ def parse_args():
     parser.add_argument("--entity_max_length", type=int,default=32, help="max entity length in dataset.")
     parser.add_argument('--num_workers', type=int, default=0)
     parser.add_argument("--tokenizer", type=str , default='models/DialoGPT-small')
-    parser.add_argument("--text_tokenizer", type=str, default='models/robert_base')
+    parser.add_argument("--text_tokenizer", type=str, default='models/roberta_base')
     parser.add_argument("--model", type=str, default='models/DialoGPT-small',
                         help="Path to pretrained model or model identifier from huggingface.co/models.")
-    parser.add_argument("--text_encoder", type=str, default='models/robert_base')
+    parser.add_argument("--text_encoder", type=str, default='models/roberta_base')
     parser.add_argument("--num_bases", type=int, default=8, help="num_bases in RGCN.")
     parser.add_argument("--n_prefix_rec", type=int,default=10)
     parser.add_argument("--prompt_encoder", type=str,default='output/rec/src/pre-trained-inspired/final')
