@@ -696,6 +696,7 @@ class MMPrompt(nn.Module):
 class ContextGuidedFusion(nn.Module):
     def __init__(self, hidden_size):
         super(ContextGuidedFusion, self).__init__()
+        self.scale = math.sqrt(hidden_size)
         self.hidden_size = hidden_size
 
         # mạng tính toán attention score từ context
@@ -710,34 +711,53 @@ class ContextGuidedFusion(nn.Module):
         kg_embeds, image_embeds, text_embeds: (batch_size, entity_len, hidden_size)
         """
         if len(token_embeds.shape) == 3:
-            q = torch.mean(token_embeds, dim=1)  # (batch_size, hidden_size)
+            q = token_embeds[:, -1, :]  # last token, (bs, hidden)
         else:
             q = token_embeds
-        
+
         q = self.context_query(q).unsqueeze(1)  # (batch_size, 1, hidden_size)
 
         # Tính Score tương quan giữa Context và từng Modality
-        kg_score = torch.sum(q * self.kg_key(kg_embeds), dim=-1, keepdim=True)
-        img_score = torch.sum(q * self.image_key(image_embeds), dim=-1, keepdim=True)
-        txt_score = torch.sum(q * self.text_key(text_embeds), dim=-1, keepdim=True)
+        kg_score = (
+            torch.sum(q * self.kg_key(kg_embeds), dim=-1, keepdim=True) / self.scale
+        )
+        img_score = (
+            torch.sum(q * self.image_key(image_embeds), dim=-1, keepdim=True)
+            / self.scale
+        )
+        txt_score = (
+            torch.sum(q * self.text_key(text_embeds), dim=-1, keepdim=True) / self.scale
+        )
 
         # Gộp và tính Softmax weights
         scores = torch.cat([kg_score, img_score, txt_score], dim=-1)  # (bs, ent_len, 3)
         weights = F.softmax(scores, dim=-1)
 
         # Hợp nhất có trọng số
-        fused_feat = (weights[:, :, 0:1] * kg_embeds +
-                      weights[:, :, 1:2] * image_embeds +
-                      weights[:, :, 2:3] * text_embeds)
-        
+        fused_feat = (
+            weights[:, :, 0:1] * kg_embeds
+            + weights[:, :, 1:2] * image_embeds
+            + weights[:, :, 2:3] * text_embeds
+        )
+
         return fused_feat, weights
 
 
 class MMPrompt_ContextAware(nn.Module):
     def __init__(
-        self, hidden_size, token_hidden_size, n_head, n_layer, n_block,
-        n_entity, num_relations, num_bases, edge_index, edge_type,
-        text_embeds_init, image_embeds_init
+        self,
+        hidden_size,
+        token_hidden_size,
+        n_head,
+        n_layer,
+        n_block,
+        n_entity,
+        num_relations,
+        num_bases,
+        edge_index,
+        edge_type,
+        text_embeds_init,
+        image_embeds_init,
     ):
         super(MMPrompt_ContextAware, self).__init__()
         self.hidden_size = hidden_size
@@ -745,67 +765,113 @@ class MMPrompt_ContextAware(nn.Module):
         self.head_dim = hidden_size // n_head
         self.n_layer = n_layer
         self.n_block = n_block
+        assert n_block == 2, "n_block must be 2 (Key and Value)"
+
+        entity_hidden_size = hidden_size // 2
 
         # Modality Encoders
-        self.kg_encoder = RGCNConv(hidden_size // 2, hidden_size // 2, num_relations=num_relations, num_bases=num_bases)
-        self.node_embeds = nn.Parameter(torch.empty(n_entity, hidden_size // 2))
+        self.kg_encoder = RGCNConv(
+            entity_hidden_size,
+            entity_hidden_size,
+            num_relations=num_relations,
+            num_bases=num_bases,
+        )
+        self.node_embeds = nn.Parameter(torch.empty(n_entity, entity_hidden_size))
         nn.init.kaiming_uniform_(self.node_embeds, a=math.sqrt(5))
-        
+
         self.text_features = nn.Embedding.from_pretrained(text_embeds_init, freeze=True)
-        self.image_features = nn.Embedding.from_pretrained(image_embeds_init, freeze=True)
+        self.image_features = nn.Embedding.from_pretrained(
+            image_embeds_init, freeze=True
+        )
 
         # Projection Layers
-        self.kg_proj = nn.Linear(hidden_size // 2, hidden_size)
+        self.entity_proj1 = nn.Sequential(
+            nn.Linear(entity_hidden_size, entity_hidden_size // 2),
+            nn.ReLU(),
+            nn.Linear(entity_hidden_size // 2, entity_hidden_size),
+        )
+        self.entity_proj2 = nn.Linear(entity_hidden_size, hidden_size)
         self.text_proj = nn.Linear(768, hidden_size)
         self.image_proj = nn.Linear(768, hidden_size)
-        
+
         self.dynamic_fusion = ContextGuidedFusion(hidden_size)
-        
+
         self.prompt_proj1 = nn.Sequential(
             nn.Linear(hidden_size, hidden_size // 2),
             nn.ReLU(),
             nn.Linear(hidden_size // 2, hidden_size),
         )
         self.prompt_proj2 = nn.Linear(hidden_size, n_layer * n_block * hidden_size)
-        
+
+        self.token_proj1 = nn.Sequential(
+            nn.Linear(token_hidden_size, token_hidden_size // 2),
+            nn.ReLU(),
+            nn.Linear(token_hidden_size // 2, token_hidden_size),
+        )
+        self.token_proj2 = nn.Linear(token_hidden_size, hidden_size)
+
         self.edge_index = nn.Parameter(edge_index, requires_grad=False)
         self.edge_type = nn.Parameter(edge_type, requires_grad=False)
 
     def get_entity_embeds(self):
-        kg_all = self.kg_encoder(self.node_embeds, self.edge_index, self.edge_type)
-        return self.kg_proj(kg_all)
+        node_embeds = self.node_embeds
+        entity_embeds = (
+            self.kg_encoder(node_embeds, self.edge_index, self.edge_type) + node_embeds
+        )
+        entity_embeds = self.entity_proj1(entity_embeds) + entity_embeds
+        entity_embeds = self.entity_proj2(entity_embeds)
+        return entity_embeds
 
     def forward(self, entity_ids, token_embeds, output_entity=False):
         batch_size, entity_len = entity_ids.shape[:2]
-        
+
         # Extract features
         kg_all = self.get_entity_embeds()
         kg_feat = kg_all[entity_ids]
-        
+
+        if token_embeds is not None:
+            batch_size, token_len = token_embeds.shape[:2]
+            token_embeds = (
+                self.token_proj1(token_embeds) + token_embeds
+            )  # (batch_size, token_len, hidden_size)
+            token_embeds = self.token_proj2(token_embeds)
+
         text_feat = self.text_proj(self.text_features(entity_ids))
         image_feat = self.image_proj(self.image_features(entity_ids))
 
         # Dynamic Context-Guided Fusion
-        fused, weights = self.dynamic_fusion(token_embeds, kg_feat, image_feat, text_feat)
-        
+        fused, weights = self.dynamic_fusion(
+            token_embeds, kg_feat, image_feat, text_feat
+        )
+
         # Contrastive Learning Alignment
         loss_cl = torch.tensor(0.0, device=fused.device)
         if output_entity:
             # Align dialogue context with fused representation
-            ctx_rep = torch.mean(token_embeds, dim=1) if len(token_embeds.shape)==3 else token_embeds
+            ctx_rep = token_embeds[:, -1, :]  # (bs, hidden) — last token
             ent_rep = torch.mean(fused, dim=1)
             # InfoNCE style alignment
-            logits = F.cosine_similarity(ctx_rep.unsqueeze(1), ent_rep.unsqueeze(0), dim=-1) / 0.07
-            loss_cl = F.cross_entropy(logits, torch.arange(batch_size, device=logits.device))
+            logits = (
+                F.cosine_similarity(ctx_rep.unsqueeze(1), ent_rep.unsqueeze(0), dim=-1)
+                / 0.07
+            )
+            labels = torch.arange(batch_size, device=logits.device)
+
+            loss_cl = F.cross_entropy(logits, labels)
 
         # Project to prompt space
         prompt_embeds = self.prompt_proj1(fused) + fused
         prompt_embeds = self.prompt_proj2(prompt_embeds)
         prompt_embeds = prompt_embeds.reshape(
-            batch_size, entity_len, self.n_layer, self.n_block, self.n_head, self.head_dim
+            batch_size,
+            entity_len,
+            self.n_layer,
+            self.n_block,
+            self.n_head,
+            self.head_dim,
         ).permute(2, 3, 0, 4, 1, 5)
 
-        return prompt_embeds, loss_cl
+        return prompt_embeds, loss_cl, kg_all
 
     def save(self, save_dir):
         os.makedirs(save_dir, exist_ok=True)
@@ -813,4 +879,7 @@ class MMPrompt_ContextAware(nn.Module):
         torch.save(state_dict, os.path.join(save_dir, "model.pt"))
 
     def load(self, load_dir):
-        self.load_state_dict(torch.load(os.path.join(load_dir, "model.pt"), map_location="cpu"), strict=False)
+        self.load_state_dict(
+            torch.load(os.path.join(load_dir, "model.pt"), map_location="cpu"),
+            strict=False,
+        )
